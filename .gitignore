@@ -7,6 +7,7 @@ local_config.json
 
 # cache/generated files
 .cache/
+.cache_meta.json
 thumb_cache/
 page_cache/
 pdf_page_cache/

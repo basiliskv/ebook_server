@@ -8,6 +8,7 @@ from urllib.parse import unquote, unquote_plus, quote
 from urllib.request import Request, urlopen
 
 from backend import (
+    query_plus_as_space,
     list_books,
     resolve_library,
     LIBRARIES,
@@ -147,7 +148,8 @@ def raw_query_param(name):
     prefix = f"{name}=".encode("utf-8")
     for chunk in request.query_string.split(b"&"):
         if chunk.startswith(prefix):
-            return unquote_plus(chunk[len(prefix):].decode("utf-8", errors="strict"))
+            value = chunk[len(prefix):].decode("utf-8", errors="strict")
+            return unquote_plus(value) if query_plus_as_space() else unquote(value)
     return None
 
 

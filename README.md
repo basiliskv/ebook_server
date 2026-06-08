@@ -23,6 +23,11 @@ cp local_config.example.json local_config.json
   "defaultProfile": "default",
   "defaultLibrary": "books",
   "cacheRoot": ".cache",
+  "profileOptions": {
+    "default": {
+      "queryPlusAsSpace": false
+    }
+  },
   "profiles": {
     "default": {
       "books": "/path/to/your/books",
@@ -31,6 +36,10 @@ cp local_config.example.json local_config.json
   }
 }
 ```
+
+`profileOptions.<profile>.queryPlusAsSpace` controls how `+` in query parameters is interpreted.
+- `false`: keep `+` as a literal plus sign. This is safer on Windows when filenames contain `+`.
+- `true`: decode `+` as space, which may match some macOS/browser flows.
 
 Run:
 

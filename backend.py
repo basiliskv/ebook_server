@@ -25,6 +25,11 @@ DEFAULT_CONFIG = {
     "defaultProfile": "default",
     "defaultLibrary": "sample",
     "cacheRoot": ".cache",
+    "profileOptions": {
+        "default": {
+            "queryPlusAsSpace": False,
+        },
+    },
     "profiles": {
         "default": {
             "sample": "./library",
@@ -58,6 +63,7 @@ LIBRARY_PROFILES = {
     for profile, libraries in LOCAL_CONFIG.get("profiles", {}).items()
     if isinstance(libraries, dict) and libraries
 }
+PROFILE_OPTIONS = LOCAL_CONFIG.get("profileOptions", {})
 if not LIBRARY_PROFILES:
     LIBRARY_PROFILES = dict(DEFAULT_CONFIG["profiles"])
 
@@ -76,7 +82,12 @@ META_FILE = ".cache_meta.json"
 def configure_cache_paths():
     global CACHE_ROOT, THUMB_DIR, PAGE_CACHE_DIR, PDF_PAGE_CACHE_DIR, VIDEO_CACHE_DIR, META_FILE
 
-    CACHE_ROOT = os.environ.get("EBOOK_CACHE_ROOT") or LOCAL_CONFIG.get("cacheRoot") or ".cache"
+    CACHE_ROOT = (
+        os.environ.get("EBOOK_CACHE_ROOT")
+        or get_profile_option("cacheRoot", default=None)
+        or LOCAL_CONFIG.get("cacheRoot")
+        or ".cache"
+    )
     THUMB_DIR = os.path.join(CACHE_ROOT, "thumb_cache")
     PAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "page_cache")
     PDF_PAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "pdf_page_cache")
@@ -113,6 +124,22 @@ def configure_library_profile(profile=None):
 
 def get_active_profile():
     return ACTIVE_PROFILE
+
+
+def get_profile_option(name, default=None, profile=None):
+    selected = profile or ACTIVE_PROFILE
+    options = PROFILE_OPTIONS.get(selected, {})
+    if not isinstance(options, dict):
+        return default
+    return options.get(name, default)
+
+
+def query_plus_as_space(profile=None):
+    selected = (profile or ACTIVE_PROFILE or "").lower()
+    configured = get_profile_option("queryPlusAsSpace", default=None, profile=profile)
+    if configured is not None:
+        return bool(configured)
+    return selected in {"mac", "darwin"}
 
 
 configure_library_profile()

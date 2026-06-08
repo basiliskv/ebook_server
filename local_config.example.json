@@ -2,6 +2,11 @@
   "defaultProfile": "default",
   "defaultLibrary": "books",
   "cacheRoot": ".cache",
+  "profileOptions": {
+    "default": {
+      "queryPlusAsSpace": false
+    }
+  },
   "profiles": {
     "default": {
       "books": "/path/to/your/books",
