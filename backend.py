@@ -268,6 +268,14 @@ def _natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
+def eagle_updated_at(meta):
+    for key in ("lastModified", "mtime", "modificationTime", "btime"):
+        value = meta.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return value / 1000 if value > 10_000_000_000 else value
+    return 0
+
+
 def get_next_book_suggestion(book, library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     books = list_books(library)
@@ -428,6 +436,103 @@ def _eagle_folder_map_cached(meta_path, _mtime):
     return out
 
 
+def eagle_folder_summaries(library=DEFAULT_LIBRARY):
+    library = resolve_library(library)
+    images_dir = eagle_images_dir(library)
+    library_meta_path = os.path.join(LIBRARIES[library], "metadata.json")
+    signature = (
+        _file_mtime(images_dir),
+        _file_mtime(library_meta_path),
+    )
+    return _eagle_folder_summaries_cached(images_dir, library_meta_path, signature, library)
+
+
+@lru_cache(maxsize=16)
+def _eagle_folder_summaries_cached(images_dir, library_meta_path, _signature, library):
+    folder_lookup = _eagle_folder_map_cached(library_meta_path, _file_mtime(library_meta_path))
+    counts = {}
+    newest = {}
+    children = {}
+
+    def folder_parts(path):
+        return [part.strip() for part in str(path).replace("／", "/").split("/") if part.strip()]
+
+    try:
+        entries = list(os.scandir(images_dir))
+    except OSError as exc:
+        LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
+        return []
+
+    for entry in entries:
+        if not entry.name.lower().endswith(".info"):
+            continue
+
+        meta_path = os.path.join(entry.path, "metadata.json")
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        folder_ids = meta.get("folders", [])
+        if not isinstance(folder_ids, list):
+            folder_ids = []
+        folder_paths = [folder_lookup[fid]["path"] for fid in folder_ids if fid in folder_lookup]
+        group = folder_paths[0] if folder_paths else "(root)"
+        updated_at = eagle_updated_at(meta)
+
+        if group == "(root)":
+            counts["(root)"] = counts.get("(root)", 0) + 1
+            newest["(root)"] = max(newest.get("(root)", 0), updated_at)
+            continue
+
+        parts = folder_parts(group)
+        if not parts:
+            counts["(root)"] = counts.get("(root)", 0) + 1
+            newest["(root)"] = max(newest.get("(root)", 0), updated_at)
+            continue
+
+        group_path = "/".join(parts)
+        counts[group_path] = counts.get(group_path, 0) + 1
+        newest[group_path] = max(newest.get(group_path, 0), updated_at)
+
+        current = []
+        for part in parts:
+            parent = "/".join(current) if current else None
+            current.append(part)
+            path = "/".join(current)
+            children.setdefault(parent, set()).add(path)
+            newest[path] = max(newest.get(path, 0), updated_at)
+
+    def folder_title(path):
+        parts = folder_parts(path)
+        return parts[-1] if parts else path
+
+    rows = []
+    if counts.get("(root)", 0) > 0:
+        rows.append({"group": "(root)", "title": "未分類", "count": counts["(root)"], "depth": 0, "hasChildren": False})
+
+    def append_rows(parent, depth):
+        child_paths = sorted(
+            children.get(parent, set()),
+            key=lambda path: (-newest.get(path, 0), folder_title(path).lower()),
+        )
+        for path in child_paths:
+            rows.append(
+                {
+                    "group": path,
+                    "title": folder_title(path),
+                    "count": counts.get(path, 0),
+                    "depth": depth,
+                    "hasChildren": bool(children.get(path)),
+                }
+            )
+            append_rows(path, depth + 1)
+
+    append_rows(None, 0)
+    return rows
+
+
 def eagle_item_dir(book, library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     book = os.path.normpath(unquote(book))
@@ -448,11 +553,15 @@ def _find_eagle_media_name(item_dir, meta):
 
     for fname in os.listdir(item_dir):
         lower = fname.lower()
+        if lower.startswith("."):
+            continue
         if lower == "metadata.json":
             continue
         if lower.endswith(".json"):
             continue
         if "_thumbnail" in lower:
+            continue
+        if not lower.endswith(STANDALONE_MEDIA_EXTS):
             continue
         return fname
     return None

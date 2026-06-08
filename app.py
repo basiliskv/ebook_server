@@ -27,6 +27,7 @@ from backend import (
     get_eagle_pages,
     eagle_page_token,
     eagle_folder_map,
+    eagle_folder_summaries,
     parse_eagle_page_token,
     thumb_path,
     make_zip_thumb,
@@ -651,6 +652,8 @@ def api_books():
     def book_payload(book):
         if is_eagle_library(library):
             item = get_eagle_item(book, library)
+            if not item or not item.get("media_name"):
+                return None
             meta = item.get("meta", {}) if item else {}
             if not isinstance(meta, dict):
                 meta = {}
@@ -691,18 +694,21 @@ def api_books():
         payload.update(get_book_metadata(book, library))
         return payload
 
+    book_payloads = [payload for payload in (book_payload(book) for book in books) if payload]
+
     return jsonify(
         {
             "library": library,
             "libraries": sorted(LIBRARIES.keys()),
             "libraryKinds": library_kinds(),
             "uploadLibraries": upload_libraries(),
+            "folderSummaries": eagle_folder_summaries(library) if is_eagle_library(library) else None,
             "offset": offset,
             "limit": requested_limit,
             "total": total,
             "hasMore": has_more,
             "nextOffset": next_offset if has_more else None,
-            "books": [book_payload(book) for book in books],
+            "books": book_payloads,
         }
     )
 
