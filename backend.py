@@ -15,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 EAGLE_CACHE_TTL_SECONDS = float(os.environ.get("EAGLE_CACHE_TTL_SECONDS", "8"))
 EAGLE_PAGE_NEIGHBOR_SCAN_LIMIT = int(os.environ.get("EAGLE_PAGE_NEIGHBOR_SCAN_LIMIT", "900"))
 EAGLE_PAGE_WINDOW_LIMIT = int(os.environ.get("EAGLE_PAGE_WINDOW_LIMIT", "360"))
+EAGLE_FOLDER_SUMMARY_SCAN_LIMIT = int(os.environ.get("EAGLE_FOLDER_SUMMARY_SCAN_LIMIT", "5000"))
 EAGLE_ITEM_SNAPSHOT_CACHE = {}
 
 # ======================
@@ -440,11 +441,58 @@ def eagle_folder_summaries(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     images_dir = eagle_images_dir(library)
     library_meta_path = os.path.join(LIBRARIES[library], "metadata.json")
+    try:
+        item_count = sum(1 for entry in os.scandir(images_dir) if entry.name.lower().endswith(".info"))
+    except OSError as exc:
+        LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
+        return []
+
+    if item_count > EAGLE_FOLDER_SUMMARY_SCAN_LIMIT:
+        return _eagle_folder_structure_summaries_cached(
+            library_meta_path,
+            _file_mtime(library_meta_path),
+        )
+
     signature = (
         _file_mtime(images_dir),
         _file_mtime(library_meta_path),
     )
     return _eagle_folder_summaries_cached(images_dir, library_meta_path, signature, library)
+
+
+@lru_cache(maxsize=16)
+def _eagle_folder_structure_summaries_cached(library_meta_path, _mtime):
+    folders = _eagle_library_metadata_cached(library_meta_path, _mtime).get("folders", [])
+    rows = []
+
+    def walk(nodes, parents):
+        sorted_nodes = sorted(
+            [node for node in nodes if isinstance(node, dict)],
+            key=lambda node: (
+                -(eagle_updated_at(node) or 0),
+                str(node.get("name") or node.get("id") or "").lower(),
+            ),
+        )
+        for node in sorted_nodes:
+            name = node.get("name") or node.get("id") or "(unnamed)"
+            path_parts = parents + [name]
+            children = node.get("children", [])
+            if not isinstance(children, list):
+                children = []
+            rows.append(
+                {
+                    "group": "/".join(path_parts),
+                    "title": name,
+                    "count": 0,
+                    "depth": max(len(path_parts) - 1, 0),
+                    "hasChildren": bool(children),
+                }
+            )
+            walk(children, path_parts)
+
+    if isinstance(folders, list):
+        walk(folders, [])
+    return rows
 
 
 @lru_cache(maxsize=16)
@@ -638,10 +686,14 @@ def list_eagle_item_ids_fast(library=DEFAULT_LIBRARY):
     for entry in entries:
         if not entry.name.lower().endswith(".info"):
             continue
+        meta_path = os.path.join(entry.path, "metadata.json")
         try:
-            updated_at = entry.stat(follow_symlinks=False).st_mtime
+            updated_at = os.path.getmtime(meta_path)
         except OSError:
-            updated_at = 0
+            try:
+                updated_at = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                updated_at = 0
         item_id = entry.name[:-5]
         items.append((item_id, updated_at))
 
