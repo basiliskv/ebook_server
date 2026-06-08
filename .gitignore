@@ -1,0 +1,16 @@
+# local machine settings
+local_config.json
+*.local.json
+
+# OS/editor noise
+.DS_Store
+
+# cache/generated files
+.cache/
+thumb_cache/
+page_cache/
+pdf_page_cache/
+video_cache/
+K:*/
+*.pyc
+__pycache__/

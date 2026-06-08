@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Books</title>
+
+<style>
+:root{
+  --bg: #efefef;
+  --card-bg: #ffffff;
+  --shadow: 0 6px 14px rgba(0,0,0,.18);
+}
+
+body{
+  margin:0;
+  background:var(--bg);
+  color:#111;
+  font-family:-apple-system,BlinkMacSystemFont,
+    "Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+}
+
+/* ===== 検索バー ===== */
+#searchBar{
+  position:sticky;
+  top:0;
+  z-index:10;
+  padding:12px 16px;
+  background:var(--bg);
+}
+
+#librarySwitch{
+  display:flex;
+  gap:8px;
+  margin-bottom:10px;
+}
+
+.lib-link{
+  display:inline-block;
+  padding:6px 10px;
+  border-radius:999px;
+  font-size:12px;
+  text-decoration:none;
+  color:#333;
+  background:#ddd;
+}
+
+.lib-link.active{
+  background:#111;
+  color:#fff;
+}
+
+.filter-btn{
+  display:inline-block;
+  padding:6px 10px;
+  border-radius:999px;
+  font-size:12px;
+  text-decoration:none;
+  color:#333;
+  background:#ddd;
+  border:0;
+  cursor:pointer;
+}
+.filter-btn.active{
+  background:#111;
+  color:#fff;
+}
+
+#recentEmpty{
+  padding:24px;
+  text-align:center;
+  color:#666;
+  display:none;
+}
+
+#searchInput{
+  width:100%;
+  padding:10px 14px;
+  font-size:14px;
+  border-radius:8px;
+  border:1px solid #ccc;
+  box-sizing:border-box;
+}
+
+/* ===== グリッド ===== */
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:20px;
+  padding:20px;
+}
+
+/* ===== グループ ===== */
+.group{
+  padding:8px 0 2px;
+}
+
+.group-title{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:8px 20px 0;
+  font-size:18px;
+  color:#222;
+}
+
+.group-title .count{
+  font-size:14px;
+  background:#111;
+  color:#fff;
+  padding:2px 8px;
+  border-radius:999px;
+}
+
+/* ===== 本カード ===== */
+.book{
+  background:var(--card-bg);
+  border-radius:6px;
+  box-shadow:var(--shadow);
+  overflow:hidden;
+  cursor:pointer;
+}
+
+.book img{
+  width:100%;
+  display:block;
+  background:#ddd;
+}
+
+.title{
+  padding:6px 8px;
+  font-size:12px;
+  text-align:center;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+/* ===== アニメ用 ===== */
+.thumb-clone{
+  position:fixed;
+  z-index:9999;
+  border-radius:12px;
+  box-shadow:0 20px 40px rgba(0,0,0,.45);
+  transition:
+    transform .8s cubic-bezier(.2,.8,.2,1),
+    opacity .8s;
+  will-change:transform;
+  pointer-events:none;
+}
+</style>
+</head>
+
+<body>
+
+<!-- 検索バー -->
+<div id="searchBar">
+  <div id="librarySwitch">
+  {% for lib in libraries %}
+    <a class="lib-link {% if lib == library and view != 'recent' %}active{% endif %}"
+       href="{{ url_for('index', library=lib) }}">{{ lib }}</a>
+  {% endfor %}
+    <a class="lib-link {% if view == 'recent' %}active{% endif %}"
+       href="{{ url_for('index', library=library, view='recent') }}">recent</a>
+    <button id="videoFilterBtn" class="filter-btn" type="button">video</button>
+  </div>
+  <input id="searchInput" type="text" placeholder="本・フォルダ名で検索">
+</div>
+
+{% for g in groups %}
+<div class="group">
+  <div class="group-title">
+    <div class="name">{{ g.name }}</div>
+    <div class="count">{{ g.books|length }}</div>
+  </div>
+  <div class="grid">
+  {% for b in g.books %}
+    <div class="book"
+         data-url="{{ url_for('open_book', book=b, library=library) }}"
+         data-book="{{ b }}"
+         data-library="{{ library }}"
+         data-has-video="{{ 1 if video_map.get(b) else 0 }}">
+      <img src="{{ url_for('cover', book=b, library=library) }}">
+      <div class="title">{{ title_map.get(b, b.split('/')[-1]) }}</div>
+    </div>
+  {% endfor %}
+  </div>
+</div>
+{% endfor %}
+<div id="recentEmpty">recent に表示する本がありません</div>
+
+<script>
+const SCALE_OVER = 1.15;
+const CURRENT_VIEW = "{{ view }}";
+const CURRENT_LIBRARY = "{{ library }}";
+const RECENT_KEY = "recent_books";
+const LIST_STATE_KEY = "books_list_state";
+const IS_BACK = new URLSearchParams(location.search).get("back") === "1";
+const VIDEO_FILTER_KEY = "books_video_only";
+let recentSet = null;
+
+/* ===== 検索（タイトル + フォルダ名） ===== */
+const searchInput = document.getElementById("searchInput");
+const recentEmpty = document.getElementById("recentEmpty");
+const videoFilterBtn = document.getElementById("videoFilterBtn");
+let videoOnly = localStorage.getItem(VIDEO_FILTER_KEY) === "1";
+
+function loadRecent(){
+  try{
+    const raw = localStorage.getItem(RECENT_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  }catch{
+    return [];
+  }
+}
+
+function saveRecent(list){
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 50)));
+}
+
+function loadListState(){
+  try{
+    const raw = sessionStorage.getItem(LIST_STATE_KEY);
+    if(!raw) return null;
+    const state = JSON.parse(raw);
+    if(state.library !== CURRENT_LIBRARY) return null;
+    if(state.view !== CURRENT_VIEW) return null;
+    return state;
+  }catch{
+    return null;
+  }
+}
+
+function saveListState(){
+  const state = {
+    library: CURRENT_LIBRARY,
+    view: CURRENT_VIEW,
+    q: searchInput.value || "",
+    y: scrollY || 0
+  };
+  sessionStorage.setItem(LIST_STATE_KEY, JSON.stringify(state));
+}
+
+function updateRecent(book, library){
+  const now = Date.now();
+  const list = loadRecent().filter(
+    (i)=>!(i.book===book && i.library===library)
+  );
+  list.unshift({ book, library, ts: now });
+  saveRecent(list);
+}
+
+function buildRecentSet(){
+  if(CURRENT_VIEW !== "recent") return null;
+  const list = loadRecent().filter(i=>i.library===CURRENT_LIBRARY);
+  return new Set(list.map(i=>i.book));
+}
+
+function applyFilters(){
+  const q = searchInput.value.toLowerCase();
+  let shown = 0;
+
+  document.querySelectorAll(".book").forEach(card=>{
+    const title =
+      card.querySelector(".title").textContent.toLowerCase();
+
+    // 例: aiueo/kakikukeko.pdf
+    const path =
+      card.dataset.book.toLowerCase();
+
+    // タイトル or フォルダ名 or フルパスにヒット
+    const hit =
+      title.includes(q) ||
+      path.includes(q);
+
+    const recentHit =
+      !recentSet || recentSet.has(card.dataset.book);
+
+    const videoHit = !videoOnly || card.dataset.hasVideo === "1";
+
+    const show = hit && recentHit && videoHit;
+    card.style.display = show ? "" : "none";
+    if(show) shown++;
+  });
+
+  if(CURRENT_VIEW === "recent"){
+    recentEmpty.style.display = shown ? "none" : "block";
+  }
+
+  document.querySelectorAll(".group").forEach(group=>{
+    const anyVisible = [...group.querySelectorAll(".book")]
+      .some((b)=>b.style.display !== "none");
+    group.style.display = anyVisible ? "" : "none";
+  });
+}
+
+const restoredState = IS_BACK ? loadListState() : null;
+if(restoredState && typeof restoredState.q === "string"){
+  searchInput.value = restoredState.q;
+}
+
+recentSet = buildRecentSet();
+applyFilters();
+
+searchInput.addEventListener("input", applyFilters);
+
+if(videoFilterBtn){
+  if(videoOnly) videoFilterBtn.classList.add("active");
+  videoFilterBtn.addEventListener("click", ()=>{
+    videoOnly = !videoOnly;
+    localStorage.setItem(VIDEO_FILTER_KEY, videoOnly ? "1" : "0");
+    videoFilterBtn.classList.toggle("active", videoOnly);
+    applyFilters();
+  });
+}
+
+/* ===== サムネ拡大アニメ ===== */
+function animateOpen(card){
+  const img = card.querySelector("img");
+  const rect = img.getBoundingClientRect();
+  const clone = img.cloneNode(true);
+
+  clone.className = "thumb-clone";
+  clone.style.left = rect.left + "px";
+  clone.style.top = rect.top + "px";
+  clone.style.width = rect.width + "px";
+  clone.style.height = rect.height + "px";
+
+  document.body.appendChild(clone);
+  document.body.style.overflow = "hidden";
+
+  requestAnimationFrame(()=>{
+    const vw = innerWidth;
+    const vh = innerHeight;
+    const scale = Math.max(vw/rect.width, vh/rect.height) * SCALE_OVER;
+    const tx = vw/2 - (rect.left + rect.width/2);
+    const ty = vh/2 - (rect.top + rect.height/2);
+
+    clone.style.transform =
+      `translate(${tx}px,${ty}px) scale(${scale})`;
+  });
+
+  return clone;
+}
+
+document.querySelectorAll(".book").forEach(card=>{
+  card.onclick=()=>{
+    animateOpen(card);
+
+    sessionStorage.setItem("last_book", card.dataset.book);
+    saveListState();
+    updateRecent(card.dataset.book, card.dataset.library);
+
+    setTimeout(()=>{
+      location.href = card.dataset.url;
+    }, 800);
+  };
+});
+
+/* ===== 戻り時の逆アニメ ===== */
+window.addEventListener("load",()=>{
+  if(restoredState && Number.isFinite(+restoredState.y)){
+    scrollTo(0, +restoredState.y);
+  }
+
+  if(!location.search.includes("back=1")) return;
+
+  const book = sessionStorage.getItem("last_book");
+  const card = [...document.querySelectorAll(".book")]
+    .find(b=>b.dataset.book===book);
+  if(!card) return;
+
+  const img = card.querySelector("img");
+  const rect = img.getBoundingClientRect();
+
+  const clone = img.cloneNode(true);
+  clone.className="thumb-clone";
+
+  const vw=innerWidth, vh=innerHeight;
+  const scale = Math.max(vw/rect.width, vh/rect.height) * SCALE_OVER;
+  const tx = vw/2 - (rect.left + rect.width/2);
+  const ty = vh/2 - (rect.top + rect.height/2);
+
+  clone.style.left = rect.left + "px";
+  clone.style.top = rect.top + "px";
+  clone.style.width = rect.width + "px";
+  clone.style.height = rect.height + "px";
+  clone.style.transform =
+    `translate(${tx}px,${ty}px) scale(${scale})`;
+
+  document.body.appendChild(clone);
+
+  requestAnimationFrame(()=>{
+    clone.style.transform="translate(0,0) scale(1)";
+    clone.style.opacity="0";
+  });
+
+  setTimeout(()=>clone.remove(),800);
+});
+</script>
+
+</body>
+</html>

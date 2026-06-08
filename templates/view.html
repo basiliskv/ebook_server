@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Viewer</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='viewer.css') }}">
+</head>
+
+<body>
+
+<div id="viewer" tabindex="0">
+  <div id="spreadWrap">
+    <div class="slot" id="slotR">
+      <img id="imgR">
+      <video id="vidR" playsinline muted loop controls preload="metadata"></video>
+    </div>
+    <div class="slot" id="slotL">
+      <img id="imgL">
+      <video id="vidL" playsinline muted loop controls preload="metadata"></video>
+    </div>
+  </div>
+  <a id="nextBookSuggest" class="next-suggest" href="#">
+    <img id="nextBookCover" alt="">
+    <div id="nextBookMeta">
+      <div class="label">NEXT</div>
+      <div id="nextBookTitle"></div>
+    </div>
+  </a>
+</div>
+
+<div id="ui">
+
+  <!-- top -->
+  <div id="topBar">
+    <img id="closeBtn" class="icon"
+      src="{{ url_for('static', filename='btn_close.png') }}"
+      onclick="closeViewer()">
+    <button id="listBtn" class="textBtn" type="button">list</button>
+    <div id="title">{{ title or book.split('/')[-1] }}</div>
+  </div>
+
+  <!-- bottom blur -->
+  <div id="bottomBlur"></div>
+
+  <!-- bottom ui -->
+  <div id="bottomBar">
+    <div id="controlRow">
+
+      <img id="nextBtn" class="icon"
+        src="{{ url_for('static', filename='btn_next.png') }}">
+
+      <div class="sliderStack">
+        <div class="seekRow">
+          <div class="videoControls">
+            <input id="videoSeek" type="range" min="0" max="0" step="0.01">
+            <div id="videoBufferWrap" aria-hidden="true">
+              <div id="videoBufferBar"></div>
+            </div>
+          </div>
+          <img id="muteBtn" class="icon">
+          <div id="videoSourceWrap">
+            <button id="videoSourceBtn" class="textBtn" type="button">cache</button>
+            <div id="videoSourceMenu" aria-hidden="true">
+              <button class="videoSourceOption" data-mode="cache" type="button">cache</button>
+              <button class="videoSourceOption" data-mode="original" type="button">original</button>
+            </div>
+          </div>
+        </div>
+
+        <input id="slider" type="range"
+          min="0" max="{{ pages|length - 1 }}">
+      </div>
+
+      <img id="prevBtn" class="icon"
+        src="{{ url_for('static', filename='btn_prev.png') }}">
+
+      <img id="modeBtn" class="icon">
+
+      <img id="swapBtn" class="icon"
+        src="{{ url_for('static', filename='btn_spread_swap.png') }}">
+
+      <div id="page"></div>
+
+    </div>
+  </div>
+
+</div>
+
+<div id="fileListPanel" aria-hidden="true">
+  <div class="panelHeader">
+    <div class="panelTitle">files</div>
+    <button id="listCloseBtn" class="textBtn" type="button">close</button>
+  </div>
+  <div id="fileList"></div>
+</div>
+
+<script>
+window.__VIEWER__ = {
+  pages: {{ pages|tojson }},
+  kind: "{{ kind }}",
+  bookQ: "{{ book|q }}",
+  library: "{{ library }}",
+  indexUrl: "{{ url_for('index', library=library) }}",
+  nextBook: {{ (next_book or '')|tojson }},
+  nextBookOpenUrl: {{ (url_for('open_book', book=next_book, library=library) if next_book else '')|tojson }},
+  nextBookCoverUrl: {{ (url_for('cover', book=next_book, library=library) if next_book else '')|tojson }},
+  icons: {
+    single: "{{ url_for('static', filename='btn_single.png') }}",
+    double: "{{ url_for('static', filename='btn_double.png') }}",
+    mute: "{{ url_for('static', filename='btn_mute.png') }}",
+    sound: "{{ url_for('static', filename='btn_sound.png') }}"
+  }
+};
+</script>
+<script src="{{ url_for('static', filename='viewer.js') }}"></script>
+
+</body>
+</html>

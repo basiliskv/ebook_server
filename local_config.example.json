@@ -1,0 +1,11 @@
+{
+  "defaultProfile": "default",
+  "defaultLibrary": "books",
+  "cacheRoot": ".cache",
+  "profiles": {
+    "default": {
+      "books": "/path/to/your/books",
+      "eagle": "/path/to/your/Eagle.library"
+    }
+  }
+}

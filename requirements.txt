@@ -1,0 +1,6 @@
+Flask
+Pillow
+PyMuPDF
+imageio
+imageio-ffmpeg
+rarfile
