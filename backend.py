@@ -1,7 +1,7 @@
 import os, zipfile, io, hashlib, json, tempfile, subprocess, logging
 import re
 import time
-from functools import lru_cache
+from functools import cmp_to_key, lru_cache
 from urllib.parse import unquote
 
 from PIL import Image
@@ -697,7 +697,16 @@ def list_eagle_item_ids_fast(library=DEFAULT_LIBRARY):
         item_id = entry.name[:-5]
         items.append((item_id, updated_at))
 
-    items.sort(key=lambda item: (-item[1], _natural_key(item[0])))
+    def compare_items(left, right):
+        if left[1] != right[1]:
+            return -1 if left[1] > right[1] else 1
+        left_key = _natural_key(left[0])
+        right_key = _natural_key(right[0])
+        if left_key == right_key:
+            return 0
+        return -1 if left_key > right_key else 1
+
+    items.sort(key=cmp_to_key(compare_items))
     return [item_id for item_id, _ in items]
 
 
