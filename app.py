@@ -46,6 +46,7 @@ from backend import (
     is_archive,
     is_upload_file,
     invalidate_eagle_item_snapshot,
+    invalidate_eagle_item_cache,
     list_eagle_item_ids_fast,
     library_path_for_write,
     library_base_dir,
@@ -192,12 +193,17 @@ def eagle_metadata_payload(meta):
     if not isinstance(size, (int, float)) or size < 0:
         size = None
 
+    star = meta.get("star")
+    if not isinstance(star, (int, float)):
+        star = 0
+
     return {
         "tags": tags,
         "sourceUrl": source_url,
         "annotation": annotation,
         "fileSize": int(size) if size is not None else None,
         "isDeleted": bool(meta.get("isDeleted") is True),
+        "star": min(max(int(star), 0), 5),
     }
 
 
@@ -516,6 +522,33 @@ def save_eagle_upload(storage, filename, library, directory):
             delayed_remove_file(temp_path, EAGLE_IMPORT_TEMP_TTL_SECONDS)
 
 
+def update_eagle_item_star(library, book, star):
+    if not is_eagle_library(library):
+        raise ValueError("Library is not an Eagle library")
+
+    star = min(max(int(star), 0), 5)
+    item = get_eagle_item(book, library)
+    if not item:
+        raise FileNotFoundError(book)
+
+    with eagle_library_session(library):
+        result = eagle_api_request(
+            "/api/item/update",
+            method="POST",
+            payload={"id": item["id"], "star": star},
+            timeout=10,
+        )
+        if result.get("status") != "success":
+            raise RuntimeError("Eagle item update failed")
+
+    invalidate_eagle_item_cache()
+    invalidate_eagle_item_snapshot(library)
+    updated = get_eagle_item(book, library)
+    if not updated:
+        raise FileNotFoundError(book)
+    return updated
+
+
 @app.route("/api/directories")
 def api_directories():
     library = resolve_library(request.args.get("library"))
@@ -722,6 +755,32 @@ def api_books():
             "books": book_payloads,
         }
     )
+
+
+@app.route("/api/eagle/item/star", methods=["POST"])
+def api_eagle_item_star():
+    payload = request.get_json(silent=True) or request.form
+    library = resolve_library(payload.get("library") or request.args.get("library"))
+    book = payload.get("book") or request.args.get("book")
+    if not book:
+        abort(400)
+
+    try:
+        star = min(max(int(payload.get("star", 0)), 0), 5)
+        update_eagle_item_star(library, book, star)
+        return jsonify(
+            {
+                "library": library,
+                "book": book,
+                "star": star,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        abort(404)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
 
 
 @app.route("/api/book")

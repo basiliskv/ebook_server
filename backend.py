@@ -638,6 +638,11 @@ def get_eagle_item(book, library=DEFAULT_LIBRARY):
     return _get_eagle_item_cached(item_dir, meta_path, _file_mtime(meta_path), library)
 
 
+def invalidate_eagle_item_cache():
+    _get_eagle_item_cached.cache_clear()
+    _list_eagle_items_cached.cache_clear()
+
+
 @lru_cache(maxsize=8192)
 def _get_eagle_item_cached(item_dir, meta_path, _mtime, library):
     if _mtime is None:
