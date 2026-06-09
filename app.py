@@ -635,10 +635,20 @@ def api_books():
     library = resolve_library(request.args.get("library"))
     requested_limit = bounded_int_arg("limit", default=None, minimum=1, maximum=1000)
     offset = bounded_int_arg("offset", default=0, minimum=0)
+    deleted_filter = request.args.get("deleted")
     if is_eagle_library(library) and requested_limit is not None:
         all_books = list_eagle_item_ids_fast(library)
     else:
         all_books = list_books(library)
+
+    if is_eagle_library(library) and deleted_filter in ("only", "exclude"):
+        def matches_deleted_filter(book):
+            item = get_eagle_item(book, library)
+            meta = item.get("meta") if isinstance(item, dict) else None
+            is_deleted = isinstance(meta, dict) and meta.get("isDeleted") is True
+            return is_deleted if deleted_filter == "only" else not is_deleted
+
+        all_books = [book for book in all_books if matches_deleted_filter(book)]
 
     total = len(all_books)
     if requested_limit is None:
