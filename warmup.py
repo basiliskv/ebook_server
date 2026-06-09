@@ -28,6 +28,12 @@ from backend import (
 MAX_WORKERS = min(4, os.cpu_count() or 2)
 
 
+def is_deleted_eagle_book(book, library):
+    item = get_eagle_item(book, library)
+    meta = item.get("meta") if isinstance(item, dict) else None
+    return isinstance(meta, dict) and meta.get("isDeleted") is True
+
+
 def convert_rar_to_zip(book, library):
     if not book.lower().endswith(".rar"):
         return book
@@ -71,6 +77,9 @@ def warmup_book(book, library):
 
     if is_eagle_library(library):
         item = get_eagle_item(book, library)
+        meta = item.get("meta") if isinstance(item, dict) else None
+        if isinstance(meta, dict) and meta.get("isDeleted") is True:
+            return
         if not item or not item["media_path"] or not item["media_name"]:
             return
         try:
@@ -149,6 +158,7 @@ def main():
     for library in sorted(LIBRARIES.keys()):
         library_books = list_books(library)
         if is_eagle_library(library):
+            library_books = [b for b in library_books if not is_deleted_eagle_book(b, library)]
             books.extend((library, b) for b in library_books)
             continue
 

@@ -521,6 +521,8 @@ def _eagle_folder_summaries_cached(images_dir, library_meta_path, _signature, li
                 meta = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
+        if meta.get("isDeleted") is True:
+            continue
 
         folder_ids = meta.get("folders", [])
         if not isinstance(folder_ids, list):

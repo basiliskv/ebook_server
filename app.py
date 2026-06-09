@@ -197,6 +197,7 @@ def eagle_metadata_payload(meta):
         "sourceUrl": source_url,
         "annotation": annotation,
         "fileSize": int(size) if size is not None else None,
+        "isDeleted": bool(meta.get("isDeleted") is True),
     }
 
 
