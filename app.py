@@ -691,6 +691,7 @@ def api_books():
     requested_limit = bounded_int_arg("limit", default=None, minimum=1, maximum=1000)
     offset = bounded_int_arg("offset", default=0, minimum=0)
     deleted_filter = request.args.get("deleted")
+    include_summaries = str(request.args.get("summaries", "1")).lower() not in ("0", "false", "no")
     if is_eagle_library(library) and requested_limit is not None:
         all_books = list_eagle_item_ids_fast(library)
     else:
@@ -768,7 +769,7 @@ def api_books():
             "libraries": sorted(LIBRARIES.keys()),
             "libraryKinds": library_kinds(),
             "uploadLibraries": upload_libraries(),
-            "folderSummaries": eagle_folder_summaries(library) if is_eagle_library(library) else None,
+            "folderSummaries": eagle_folder_summaries(library) if include_summaries and is_eagle_library(library) else None,
             "offset": offset,
             "limit": requested_limit,
             "total": total,
