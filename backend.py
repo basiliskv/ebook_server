@@ -270,11 +270,18 @@ def _natural_key(s):
 
 
 def eagle_updated_at(meta):
-    for key in ("lastModified", "mtime", "modificationTime", "btime"):
+    for key in ("modificationTime", "lastModified", "mtime", "btime"):
         value = meta.get(key)
         if isinstance(value, (int, float)) and value > 0:
             return value / 1000 if value > 10_000_000_000 else value
     return 0
+
+
+def eagle_sort_time(meta):
+    value = meta.get("modificationTime") if isinstance(meta, dict) else None
+    if isinstance(value, (int, float)) and value > 0:
+        return value / 1000 if value > 10_000_000_000 else value
+    return eagle_updated_at(meta if isinstance(meta, dict) else {})
 
 
 def get_next_book_suggestion(book, library=DEFAULT_LIBRARY):
@@ -679,14 +686,16 @@ def list_eagle_item_ids_fast(library=DEFAULT_LIBRARY):
             continue
         meta_path = os.path.join(entry.path, "metadata.json")
         try:
-            updated_at = os.path.getmtime(meta_path)
-        except OSError:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            sort_time = eagle_sort_time(meta)
+        except (OSError, json.JSONDecodeError):
             try:
-                updated_at = entry.stat(follow_symlinks=False).st_mtime
+                sort_time = entry.stat(follow_symlinks=False).st_mtime
             except OSError:
-                updated_at = 0
+                sort_time = 0
         item_id = entry.name[:-5]
-        items.append((item_id, updated_at))
+        items.append((item_id, sort_time))
 
     def compare_items(left, right):
         if left[1] != right[1]:
@@ -768,6 +777,7 @@ def build_eagle_items_snapshot(library, images_dir):
         if not isinstance(folder_ids, list):
             folder_ids = []
         folders = [folder_lookup[fid]["path"] for fid in folder_ids if fid in folder_lookup]
+        sort_time = eagle_sort_time(meta)
         items[item_id] = {
             "id": item_id,
             "title": media_name or meta.get("name") or item_id,
@@ -777,10 +787,16 @@ def build_eagle_items_snapshot(library, images_dir):
             "folder_ids": folder_ids,
             "folders": folders,
             "meta": meta,
+            "sort_time": sort_time,
         }
         ordered_ids.append(item_id)
 
-    ordered_ids.sort(key=_natural_key)
+    ordered_ids.sort(
+        key=lambda item_id: (
+            -items[item_id].get("sort_time", 0),
+            _natural_key(item_id),
+        )
+    )
     return {"items": items, "ordered_ids": ordered_ids}
 
 

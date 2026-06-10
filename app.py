@@ -169,7 +169,7 @@ def book_updated_at(book, library):
 
 
 def eagle_updated_at(meta):
-    for key in ("lastModified", "mtime", "modificationTime", "btime"):
+    for key in ("modificationTime", "lastModified", "mtime", "btime"):
         value = meta.get(key)
         if isinstance(value, (int, float)) and value > 0:
             return value / 1000 if value > 10_000_000_000 else value
