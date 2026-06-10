@@ -48,6 +48,7 @@ from backend import (
     invalidate_eagle_item_snapshot,
     invalidate_eagle_item_cache,
     list_eagle_item_ids_fast,
+    eagle_items_snapshot,
     library_path_for_write,
     library_base_dir,
     safe_library_relpath,
@@ -697,8 +698,10 @@ def api_books():
         all_books = list_books(library)
 
     if is_eagle_library(library) and deleted_filter in ("only", "exclude"):
+        snapshot_items = eagle_items_snapshot(library).get("items", {})
+
         def matches_deleted_filter(book):
-            item = get_eagle_item(book, library)
+            item = snapshot_items.get(book)
             meta = item.get("meta") if isinstance(item, dict) else None
             is_deleted = isinstance(meta, dict) and meta.get("isDeleted") is True
             return is_deleted if deleted_filter == "only" else not is_deleted
