@@ -545,7 +545,7 @@ def update_eagle_item_star(library, book, star):
                 invalidate_eagle_item_snapshot(library)
                 return
             api_error = RuntimeError("Eagle item update failed")
-    except RuntimeError as exc:
+    except Exception as exc:
         api_error = exc
 
     meta_path = os.path.join(eagle_item_dir(book, library), "metadata.json")
