@@ -447,15 +447,10 @@ def eagle_folder_summaries(library=DEFAULT_LIBRARY):
         LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
         return []
 
-    if item_count > EAGLE_FOLDER_SUMMARY_SCAN_LIMIT:
-        return _eagle_folder_structure_summaries_cached(
-            library_meta_path,
-            _file_mtime(library_meta_path),
-        )
-
     signature = (
         _file_mtime(images_dir),
         _file_mtime(library_meta_path),
+        item_count > EAGLE_FOLDER_SUMMARY_SCAN_LIMIT,
     )
     return _eagle_folder_summaries_cached(images_dir, library_meta_path, signature, library)
 
@@ -505,26 +500,15 @@ def _eagle_folder_summaries_cached(images_dir, library_meta_path, _signature, li
     def folder_parts(path):
         return [part.strip() for part in str(path).replace("／", "/").split("/") if part.strip()]
 
-    try:
-        entries = list(os.scandir(images_dir))
-    except OSError as exc:
-        LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
-        return []
-
-    for entry in entries:
-        if not entry.name.lower().endswith(".info"):
-            continue
-
-        meta_path = os.path.join(entry.path, "metadata.json")
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
+    snapshot = eagle_items_snapshot(library)
+    for item in snapshot.get("items", {}).values():
+        meta = item.get("meta", {})
+        if not isinstance(meta, dict):
+            meta = {}
         if meta.get("isDeleted") is True:
             continue
 
-        folder_ids = meta.get("folders", [])
+        folder_ids = item.get("folder_ids") or meta.get("folders", [])
         if not isinstance(folder_ids, list):
             folder_ids = []
         folder_paths = [folder_lookup[fid]["path"] for fid in folder_ids if fid in folder_lookup]
