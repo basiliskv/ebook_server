@@ -533,18 +533,17 @@ def update_eagle_item_star(library, book, star):
 
     api_error = None
     try:
-        with eagle_library_session(library):
-            result = eagle_api_request(
-                "/api/item/update",
-                method="POST",
-                payload={"id": item["id"], "star": star},
-                timeout=10,
-            )
-            if result.get("status") == "success":
-                invalidate_eagle_item_cache()
-                invalidate_eagle_item_snapshot(library)
-                return
-            api_error = RuntimeError("Eagle item update failed")
+        result = eagle_api_request(
+            "/api/item/update",
+            method="POST",
+            payload={"id": item["id"], "star": star},
+            timeout=10,
+        )
+        if result.get("status") == "success":
+            invalidate_eagle_item_cache()
+            invalidate_eagle_item_snapshot(library)
+            return
+        api_error = RuntimeError(result.get("message") or result.get("data") or "Eagle item update failed")
     except Exception as exc:
         api_error = exc
 
@@ -558,9 +557,9 @@ def update_eagle_item_star(library, book, star):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
             f.write("\n")
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError):
         if api_error:
-            raise RuntimeError(f"{api_error}; metadata fallback failed: {exc}") from exc
+            raise RuntimeError(f"{api_error}; metadata fallback failed") from api_error
         raise
 
     invalidate_eagle_item_cache()
