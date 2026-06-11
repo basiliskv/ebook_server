@@ -47,8 +47,7 @@ from backend import (
     is_upload_file,
     invalidate_eagle_item_snapshot,
     invalidate_eagle_item_cache,
-    list_eagle_item_ids_fast,
-    eagle_items_snapshot,
+    eagle_item_index,
     library_path_for_write,
     library_base_dir,
     safe_library_relpath,
@@ -692,21 +691,18 @@ def api_books():
     offset = bounded_int_arg("offset", default=0, minimum=0)
     deleted_filter = request.args.get("deleted")
     include_summaries = str(request.args.get("summaries", "1")).lower() not in ("0", "false", "no")
-    if is_eagle_library(library) and requested_limit is not None:
-        all_books = list_eagle_item_ids_fast(library)
+    refresh_index = str(request.args.get("refresh", "0")).lower() in ("1", "true", "yes")
+    eagle_index = None
+    if is_eagle_library(library):
+        eagle_index = eagle_item_index(library, refresh=refresh_index)
+        if deleted_filter == "only":
+            all_books = eagle_index.get("deleted_ids", [])
+        elif deleted_filter == "exclude":
+            all_books = eagle_index.get("active_ids", [])
+        else:
+            all_books = eagle_index.get("ordered_ids", [])
     else:
         all_books = list_books(library)
-
-    if is_eagle_library(library) and deleted_filter in ("only", "exclude"):
-        snapshot_items = eagle_items_snapshot(library).get("items", {})
-
-        def matches_deleted_filter(book):
-            item = snapshot_items.get(book)
-            meta = item.get("meta") if isinstance(item, dict) else None
-            is_deleted = isinstance(meta, dict) and meta.get("isDeleted") is True
-            return is_deleted if deleted_filter == "only" else not is_deleted
-
-        all_books = [book for book in all_books if matches_deleted_filter(book)]
 
     total = len(all_books)
     if requested_limit is None:
@@ -720,7 +716,7 @@ def api_books():
 
     def book_payload(book):
         if is_eagle_library(library):
-            item = get_eagle_item(book, library)
+            item = (eagle_index or {}).get("items", {}).get(book)
             if not item or not item.get("media_name"):
                 return None
             meta = item.get("meta", {}) if item else {}
@@ -771,7 +767,11 @@ def api_books():
             "libraries": sorted(LIBRARIES.keys()),
             "libraryKinds": library_kinds(),
             "uploadLibraries": upload_libraries(),
-            "folderSummaries": eagle_folder_summaries(library) if include_summaries and is_eagle_library(library) else None,
+            "folderSummaries": (
+                (eagle_index or {}).get("folder_summaries", [])
+                if include_summaries and is_eagle_library(library)
+                else None
+            ),
             "offset": offset,
             "limit": requested_limit,
             "total": total,

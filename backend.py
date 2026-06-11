@@ -1,7 +1,7 @@
 import os, zipfile, io, hashlib, json, tempfile, subprocess, logging
 import re
 import time
-from functools import cmp_to_key, lru_cache
+from functools import lru_cache
 from urllib.parse import unquote
 
 from PIL import Image
@@ -17,6 +17,8 @@ EAGLE_PAGE_NEIGHBOR_SCAN_LIMIT = int(os.environ.get("EAGLE_PAGE_NEIGHBOR_SCAN_LI
 EAGLE_PAGE_WINDOW_LIMIT = int(os.environ.get("EAGLE_PAGE_WINDOW_LIMIT", "360"))
 EAGLE_FOLDER_SUMMARY_SCAN_LIMIT = int(os.environ.get("EAGLE_FOLDER_SUMMARY_SCAN_LIMIT", "5000"))
 EAGLE_ITEM_SNAPSHOT_CACHE = {}
+EAGLE_ITEM_INDEX_CACHE = {}
+EAGLE_ITEM_INDEX_VERSION = 1
 
 # ======================
 # 設定
@@ -77,11 +79,12 @@ THUMB_DIR = "thumb_cache"
 PAGE_CACHE_DIR = "page_cache"
 PDF_PAGE_CACHE_DIR = "pdf_page_cache"
 VIDEO_CACHE_DIR = "video_cache"
+EAGLE_INDEX_DIR = "eagle_index"
 META_FILE = ".cache_meta.json"
 
 
 def configure_cache_paths():
-    global CACHE_ROOT, THUMB_DIR, PAGE_CACHE_DIR, PDF_PAGE_CACHE_DIR, VIDEO_CACHE_DIR, META_FILE
+    global CACHE_ROOT, THUMB_DIR, PAGE_CACHE_DIR, PDF_PAGE_CACHE_DIR, VIDEO_CACHE_DIR, EAGLE_INDEX_DIR, META_FILE
 
     CACHE_ROOT = (
         os.environ.get("EBOOK_CACHE_ROOT")
@@ -93,6 +96,7 @@ def configure_cache_paths():
     PAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "page_cache")
     PDF_PAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "pdf_page_cache")
     VIDEO_CACHE_DIR = os.path.join(CACHE_ROOT, "video_cache")
+    EAGLE_INDEX_DIR = os.path.join(CACHE_ROOT, "eagle_index")
     META_FILE = os.path.join(CACHE_ROOT, ".cache_meta.json")
 
     os.makedirs(CACHE_ROOT, exist_ok=True)
@@ -100,6 +104,7 @@ def configure_cache_paths():
     os.makedirs(PAGE_CACHE_DIR, exist_ok=True)
     os.makedirs(PDF_PAGE_CACHE_DIR, exist_ok=True)
     os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
+    os.makedirs(EAGLE_INDEX_DIR, exist_ok=True)
 
 
 def configure_library_profile(profile=None):
@@ -446,20 +451,7 @@ def _eagle_folder_map_cached(meta_path, _mtime):
 
 def eagle_folder_summaries(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
-    images_dir = eagle_images_dir(library)
-    library_meta_path = os.path.join(LIBRARIES[library], "metadata.json")
-    try:
-        item_count = sum(1 for entry in os.scandir(images_dir) if entry.name.lower().endswith(".info"))
-    except OSError as exc:
-        LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
-        return []
-
-    signature = (
-        _file_mtime(images_dir),
-        _file_mtime(library_meta_path),
-        item_count > EAGLE_FOLDER_SUMMARY_SCAN_LIMIT,
-    )
-    return _eagle_folder_summaries_cached(images_dir, library_meta_path, signature, library)
+    return eagle_item_index(library).get("folder_summaries", [])
 
 
 @lru_cache(maxsize=16)
@@ -632,6 +624,7 @@ def get_eagle_item(book, library=DEFAULT_LIBRARY):
 def invalidate_eagle_item_cache():
     _get_eagle_item_cached.cache_clear()
     _list_eagle_items_cached.cache_clear()
+    invalidate_eagle_index()
 
 
 @lru_cache(maxsize=8192)
@@ -666,48 +659,290 @@ def _get_eagle_item_cached(item_dir, meta_path, _mtime, library):
     }
 
 
-def list_eagle_items(library=DEFAULT_LIBRARY):
+def eagle_index_signature(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
-    return eagle_items_snapshot(library)["ordered_ids"]
+    library_path = LIBRARIES[library]
+    images_dir = eagle_images_dir(library)
+    metadata_path = os.path.join(library_path, "metadata.json")
+    return {
+        "libraryPath": os.path.abspath(library_path),
+        "imagesMtime": _file_mtime(images_dir),
+        "libraryMtime": _file_mtime(metadata_path),
+    }
 
 
-def list_eagle_item_ids_fast(library=DEFAULT_LIBRARY):
+def eagle_index_cache_path(library=DEFAULT_LIBRARY):
+    library = resolve_library(library)
+    library_path = os.path.abspath(LIBRARIES[library])
+    key = hashlib.md5(library_path.encode("utf-8")).hexdigest()
+    return os.path.join(EAGLE_INDEX_DIR, key + ".json")
+
+
+def _compact_eagle_meta(meta):
+    if not isinstance(meta, dict):
+        return {}
+    keys = (
+        "name",
+        "ext",
+        "width",
+        "height",
+        "size",
+        "isDeleted",
+        "star",
+        "tags",
+        "url",
+        "annotation",
+        "modificationTime",
+        "lastModified",
+        "mtime",
+        "btime",
+    )
+    return {key: meta[key] for key in keys if key in meta}
+
+
+def _fast_eagle_media_name(item_dir, meta):
+    name = meta.get("name")
+    ext = str(meta.get("ext") or "").lstrip(".")
+
+    if isinstance(name, str) and name.lower().endswith(STANDALONE_MEDIA_EXTS):
+        if os.path.exists(os.path.join(item_dir, name)):
+            return name
+
+    if isinstance(name, str) and ext:
+        candidate = f"{name}.{ext}"
+        if os.path.exists(os.path.join(item_dir, candidate)):
+            return candidate
+
+    try:
+        return _find_eagle_media_name(item_dir, meta)
+    except OSError:
+        return None
+
+
+def _build_eagle_folder_summary_rows(items, folder_lookup):
+    counts = {}
+    newest = {}
+    children = {}
+
+    def folder_parts(path):
+        return [part.strip() for part in str(path).replace("／", "/").split("/") if part.strip()]
+
+    for item in items.values():
+        meta = item.get("meta", {})
+        if isinstance(meta, dict) and meta.get("isDeleted") is True:
+            continue
+
+        folders = item.get("folders") or []
+        group = folders[0] if folders else "(root)"
+        updated_at = item.get("sort_time") or eagle_updated_at(meta if isinstance(meta, dict) else {})
+
+        if group == "(root)":
+            counts["(root)"] = counts.get("(root)", 0) + 1
+            newest["(root)"] = max(newest.get("(root)", 0), updated_at)
+            continue
+
+        parts = folder_parts(group)
+        if not parts:
+            counts["(root)"] = counts.get("(root)", 0) + 1
+            newest["(root)"] = max(newest.get("(root)", 0), updated_at)
+            continue
+
+        group_path = "/".join(parts)
+        counts[group_path] = counts.get(group_path, 0) + 1
+        newest[group_path] = max(newest.get(group_path, 0), updated_at)
+
+        current = []
+        for part in parts:
+            parent = "/".join(current) if current else None
+            current.append(part)
+            path = "/".join(current)
+            children.setdefault(parent, set()).add(path)
+            newest[path] = max(newest.get(path, 0), updated_at)
+
+    def folder_title(path):
+        parts = folder_parts(path)
+        return parts[-1] if parts else path
+
+    rows = []
+    if counts.get("(root)", 0) > 0:
+        rows.append({"group": "(root)", "title": "未分類", "count": counts["(root)"], "depth": 0, "hasChildren": False})
+
+    def append_rows(parent, depth):
+        child_paths = sorted(
+            children.get(parent, set()),
+            key=lambda path: (-newest.get(path, 0), folder_title(path).lower()),
+        )
+        for path in child_paths:
+            rows.append(
+                {
+                    "group": path,
+                    "title": folder_title(path),
+                    "count": counts.get(path, 0),
+                    "depth": depth,
+                    "hasChildren": bool(children.get(path)),
+                }
+            )
+            append_rows(path, depth + 1)
+
+    append_rows(None, 0)
+    return rows
+
+
+def build_eagle_item_index(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     images_dir = eagle_images_dir(library)
+    folder_lookup = eagle_folder_map(library)
+    items = {}
+
     try:
         entries = list(os.scandir(images_dir))
     except OSError as exc:
         LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
-        return []
+        return {"items": {}, "ordered_ids": [], "active_ids": [], "deleted_ids": [], "folder_summaries": []}
 
-    items = []
     for entry in entries:
         if not entry.name.lower().endswith(".info"):
             continue
+
+        item_id = entry.name[:-5]
         meta_path = os.path.join(entry.path, "metadata.json")
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            sort_time = eagle_sort_time(meta)
-        except (OSError, json.JSONDecodeError):
-            try:
-                sort_time = entry.stat(follow_symlinks=False).st_mtime
-            except OSError:
-                sort_time = 0
-        item_id = entry.name[:-5]
-        items.append((item_id, sort_time))
+                raw_meta = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Skipping unreadable Eagle item metadata %s: %s", meta_path, exc)
+            continue
 
-    def compare_items(left, right):
-        if left[1] != right[1]:
-            return -1 if left[1] > right[1] else 1
-        left_key = _natural_key(left[0])
-        right_key = _natural_key(right[0])
-        if left_key == right_key:
-            return 0
-        return -1 if left_key > right_key else 1
+        meta = _compact_eagle_meta(raw_meta)
+        media_name = _fast_eagle_media_name(entry.path, meta)
+        if not media_name:
+            continue
 
-    items.sort(key=cmp_to_key(compare_items))
-    return [item_id for item_id, _ in items]
+        folder_ids = meta.get("folders", raw_meta.get("folders", []))
+        if not isinstance(folder_ids, list):
+            folder_ids = []
+        folders = [folder_lookup[fid]["path"] for fid in folder_ids if fid in folder_lookup]
+        sort_time = eagle_sort_time(meta)
+        items[item_id] = {
+            "id": item_id,
+            "title": media_name or meta.get("name") or item_id,
+            "media_name": media_name,
+            "folder_ids": folder_ids,
+            "folders": folders,
+            "meta": meta,
+            "sort_time": sort_time,
+        }
+
+    ordered_ids = sorted(
+        items.keys(),
+        key=lambda item_id: (
+            -items[item_id].get("sort_time", 0),
+            _natural_key(item_id),
+        ),
+    )
+    active_ids = [item_id for item_id in ordered_ids if items[item_id].get("meta", {}).get("isDeleted") is not True]
+    deleted_ids = [item_id for item_id in ordered_ids if items[item_id].get("meta", {}).get("isDeleted") is True]
+    return {
+        "items": items,
+        "ordered_ids": ordered_ids,
+        "active_ids": active_ids,
+        "deleted_ids": deleted_ids,
+        "folder_summaries": _build_eagle_folder_summary_rows(items, folder_lookup),
+    }
+
+
+def _read_eagle_item_index_from_disk(path, signature):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if payload.get("version") != EAGLE_ITEM_INDEX_VERSION:
+        return None
+    if payload.get("signature") != signature:
+        return None
+    index = payload.get("index")
+    return index if isinstance(index, dict) else None
+
+
+def _write_eagle_item_index_to_disk(path, signature, index):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": EAGLE_ITEM_INDEX_VERSION,
+                    "signature": signature,
+                    "storedAt": time.time(),
+                    "index": index,
+                },
+                f,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    except OSError as exc:
+        LOGGER.warning("Could not write Eagle index cache %s: %s", path, exc)
+
+
+def eagle_item_index(library=DEFAULT_LIBRARY, refresh=False):
+    library = resolve_library(library)
+    library_path = LIBRARIES[library]
+    signature = eagle_index_signature(library)
+    cache_key = os.path.abspath(library_path)
+
+    cached = EAGLE_ITEM_INDEX_CACHE.get(cache_key)
+    if not refresh and cached and cached.get("signature") == signature:
+        return cached["index"]
+
+    cache_path = eagle_index_cache_path(library)
+    if not refresh:
+        disk_index = _read_eagle_item_index_from_disk(cache_path, signature)
+        if disk_index is not None:
+            EAGLE_ITEM_INDEX_CACHE[cache_key] = {"signature": signature, "index": disk_index}
+            return disk_index
+
+    index = build_eagle_item_index(library)
+    EAGLE_ITEM_INDEX_CACHE[cache_key] = {"signature": signature, "index": index}
+    _write_eagle_item_index_to_disk(cache_path, signature, index)
+    return index
+
+
+def eagle_index_item(book, library=DEFAULT_LIBRARY):
+    library = resolve_library(library)
+    item_id = os.path.basename(os.path.normpath(unquote(book)))
+    if item_id.lower().endswith(".info"):
+        item_id = item_id[:-5]
+    return eagle_item_index(library).get("items", {}).get(item_id)
+
+
+def invalidate_eagle_index(library=None):
+    if library is None:
+        EAGLE_ITEM_INDEX_CACHE.clear()
+        return
+
+    library = resolve_library(library)
+    cache_key = os.path.abspath(LIBRARIES[library])
+    EAGLE_ITEM_INDEX_CACHE.pop(cache_key, None)
+    try:
+        os.remove(eagle_index_cache_path(library))
+    except OSError:
+        pass
+
+
+def list_eagle_items(library=DEFAULT_LIBRARY):
+    library = resolve_library(library)
+    return eagle_item_index(library)["ordered_ids"]
+
+
+def list_eagle_item_ids_fast(library=DEFAULT_LIBRARY, deleted=None):
+    library = resolve_library(library)
+    index = eagle_item_index(library)
+    if deleted == "only":
+        return index.get("deleted_ids", [])
+    if deleted == "exclude":
+        return index.get("active_ids", [])
+    return index.get("ordered_ids", [])
 
 
 def eagle_items_snapshot(library=DEFAULT_LIBRARY):
@@ -737,6 +972,7 @@ def eagle_items_snapshot(library=DEFAULT_LIBRARY):
 def invalidate_eagle_item_snapshot(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     EAGLE_ITEM_SNAPSHOT_CACHE.pop(LIBRARIES[library], None)
+    invalidate_eagle_index(library)
 
 
 def build_eagle_items_snapshot(library, images_dir):
@@ -931,7 +1167,7 @@ def get_eagle_pages(book, library=DEFAULT_LIBRARY):
 
     selected_folder_ids = item.get("folder_ids") or []
     selected_folder = selected_folder_ids[0] if selected_folder_ids else None
-    ordered_ids = list_eagle_item_ids_fast(library)
+    ordered_ids = list_eagle_item_ids_fast(library, deleted="exclude")
     try:
         selected_pos = ordered_ids.index(item["id"])
     except ValueError:
