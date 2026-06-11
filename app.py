@@ -62,6 +62,20 @@ EAGLE_RESTORE_DELAY_SECONDS = float(os.environ.get("EAGLE_RESTORE_DELAY_SECONDS"
 EAGLE_IMPORT_TEMP_TTL_SECONDS = float(os.environ.get("EAGLE_IMPORT_TEMP_TTL_SECONDS", "600"))
 
 
+def image_has_alpha(img):
+    if img.mode in ("RGBA", "LA"):
+        extrema = img.getextrema()
+        alpha = extrema[-1] if extrema else None
+        return bool(alpha and alpha[0] < 255)
+    if img.mode == "P":
+        return "transparency" in img.info
+    return False
+
+
+def should_send_original_raster(img):
+    return bool(getattr(img, "is_animated", False) or image_has_alpha(img))
+
+
 class ServerLogBuffer:
     def __init__(self, limit=800):
         self._entries = deque(maxlen=limit)
@@ -219,6 +233,59 @@ def bounded_int_arg(name, default=None, minimum=0, maximum=None):
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def normalized_search_query(raw):
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().lower()
+
+
+def search_terms(query):
+    return [term for term in query.split() if term]
+
+
+def search_text_matches(text, query):
+    if not query:
+        return True
+    normalized = str(text or "").lower()
+    terms = search_terms(query)
+    if len(terms) <= 1:
+        return query in normalized
+    return all(term in normalized for term in terms)
+
+
+def eagle_item_matches_search(item_id, item, query):
+    search_text = item.get("search_text") if isinstance(item, dict) else None
+    if not search_text:
+        meta = item.get("meta", {}) if isinstance(item, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        tags = meta.get("tags")
+        values = [
+            item_id,
+            item.get("title") if isinstance(item, dict) else "",
+            item.get("media_name") if isinstance(item, dict) else "",
+            " ".join(item.get("folders", []) or []) if isinstance(item, dict) else "",
+            " ".join(tags) if isinstance(tags, list) else "",
+            meta.get("url", ""),
+            meta.get("annotation", ""),
+        ]
+        search_text = " ".join(str(value) for value in values if value).lower()
+    return search_text_matches(search_text, query)
+
+
+def normal_book_matches_search(book, library, query):
+    values = [book, get_book_title(book, library), " ".join(get_book_groups(book, library))]
+    metadata = get_book_metadata(book, library)
+    tags = metadata.get("tags")
+    if isinstance(tags, list):
+        values.extend(tags)
+    for key in ("sourceUrl", "annotation"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    return search_text_matches(" ".join(str(value) for value in values if value).lower(), query)
 
 
 # ======================
@@ -690,6 +757,7 @@ def api_books():
     requested_limit = bounded_int_arg("limit", default=None, minimum=1, maximum=5000)
     offset = bounded_int_arg("offset", default=0, minimum=0)
     deleted_filter = request.args.get("deleted")
+    search_query = normalized_search_query(raw_query_param("q") or request.args.get("q"))
     include_summaries = str(request.args.get("summaries", "1")).lower() not in ("0", "false", "no")
     refresh_index = str(request.args.get("refresh", "0")).lower() in ("1", "true", "yes")
     eagle_index = None
@@ -701,8 +769,21 @@ def api_books():
             all_books = eagle_index.get("active_ids", [])
         else:
             all_books = eagle_index.get("ordered_ids", [])
+        if search_query:
+            items = eagle_index.get("items", {})
+            all_books = [
+                item_id
+                for item_id in all_books
+                if eagle_item_matches_search(item_id, items.get(item_id, {}), search_query)
+            ]
     else:
         all_books = list_books(library)
+        if search_query:
+            all_books = [
+                book
+                for book in all_books
+                if normal_book_matches_search(book, library, search_query)
+            ]
 
     total = len(all_books)
     if requested_limit is None:
@@ -972,7 +1053,7 @@ def media_page():
         try:
             from PIL import Image
             img = Image.open(path)
-            if getattr(img, "is_animated", False):
+            if should_send_original_raster(img):
                 return send_file(path, mimetype=media_mimetype(path), download_name=os.path.basename(path))
         except Exception:
             pass
@@ -1030,7 +1111,7 @@ def zip_page():
                 raw = read_archive_member(arc, page)
             try:
                 img = Image.open(io.BytesIO(raw))
-                if getattr(img, "is_animated", False):
+                if should_send_original_raster(img):
                     return send_file(
                         io.BytesIO(raw),
                         mimetype=media_mimetype(page),
@@ -1102,7 +1183,7 @@ def eagle_page():
         from PIL import Image
         try:
             img = Image.open(item["media_path"])
-            if getattr(img, "is_animated", False):
+            if should_send_original_raster(img):
                 return send_file(
                     item["media_path"],
                     mimetype=media_mimetype(item["media_path"]),

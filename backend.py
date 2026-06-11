@@ -18,7 +18,7 @@ EAGLE_PAGE_WINDOW_LIMIT = int(os.environ.get("EAGLE_PAGE_WINDOW_LIMIT", "360"))
 EAGLE_FOLDER_SUMMARY_SCAN_LIMIT = int(os.environ.get("EAGLE_FOLDER_SUMMARY_SCAN_LIMIT", "5000"))
 EAGLE_ITEM_SNAPSHOT_CACHE = {}
 EAGLE_ITEM_INDEX_CACHE = {}
-EAGLE_ITEM_INDEX_VERSION = 1
+EAGLE_ITEM_INDEX_VERSION = 2
 
 # ======================
 # 設定
@@ -700,6 +700,22 @@ def _compact_eagle_meta(meta):
     return {key: meta[key] for key in keys if key in meta}
 
 
+def _eagle_item_search_text(item_id, media_name, folders, meta):
+    values = [item_id, media_name or "", meta.get("name") or ""]
+    values.extend(folders or [])
+
+    tags = meta.get("tags")
+    if isinstance(tags, list):
+        values.extend(tag for tag in tags if isinstance(tag, str))
+
+    for key in ("url", "annotation"):
+        value = meta.get(key)
+        if isinstance(value, str):
+            values.append(value)
+
+    return " ".join(str(value) for value in values if value).lower()
+
+
 def _fast_eagle_media_name(item_dir, meta):
     name = meta.get("name")
     ext = str(meta.get("ext") or "").lstrip(".")
@@ -831,6 +847,7 @@ def build_eagle_item_index(library=DEFAULT_LIBRARY):
             "folders": folders,
             "meta": meta,
             "sort_time": sort_time,
+            "search_text": _eagle_item_search_text(item_id, media_name, folders, meta),
         }
 
     ordered_ids = sorted(
