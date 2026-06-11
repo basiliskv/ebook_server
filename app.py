@@ -326,6 +326,7 @@ def api_libraries():
             "defaultLibrary": resolve_library(request.args.get("library")),
             "libraries": sorted(LIBRARIES.keys()),
             "libraryKinds": library_kinds(),
+            "libraryPaths": library_paths(),
             "uploadLibraries": upload_libraries(),
             "profile": get_active_profile(),
         }
@@ -367,6 +368,13 @@ def library_kinds():
     return {
         library: "eagle" if is_eagle_library(library) else "folder"
         for library in sorted(LIBRARIES.keys())
+    }
+
+
+def library_paths():
+    return {
+        library: os.path.abspath(path)
+        for library, path in sorted(LIBRARIES.items())
     }
 
 
@@ -847,6 +855,7 @@ def api_books():
             "library": library,
             "libraries": sorted(LIBRARIES.keys()),
             "libraryKinds": library_kinds(),
+            "libraryPaths": library_paths(),
             "uploadLibraries": upload_libraries(),
             "folderSummaries": (
                 (eagle_index or {}).get("folder_summaries", [])
