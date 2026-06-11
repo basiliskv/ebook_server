@@ -688,7 +688,7 @@ def api_upload():
 @app.route("/api/books")
 def api_books():
     library = resolve_library(request.args.get("library"))
-    requested_limit = bounded_int_arg("limit", default=None, minimum=1, maximum=1000)
+    requested_limit = bounded_int_arg("limit", default=None, minimum=1, maximum=5000)
     offset = bounded_int_arg("offset", default=0, minimum=0)
     deleted_filter = request.args.get("deleted")
     include_summaries = str(request.args.get("summaries", "1")).lower() not in ("0", "false", "no")
