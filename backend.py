@@ -1,6 +1,7 @@
-import os, zipfile, io, hashlib, json, tempfile, subprocess, logging
+import os, zipfile, io, hashlib, json, tempfile, subprocess, logging, threading
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from urllib.parse import unquote
 
@@ -19,6 +20,9 @@ EAGLE_FOLDER_SUMMARY_SCAN_LIMIT = int(os.environ.get("EAGLE_FOLDER_SUMMARY_SCAN_
 EAGLE_ITEM_SNAPSHOT_CACHE = {}
 EAGLE_ITEM_INDEX_CACHE = {}
 EAGLE_ITEM_INDEX_VERSION = 2
+EAGLE_ITEM_INDEX_REBUILDING = set()
+EAGLE_ITEM_INDEX_LOCK = threading.Lock()
+EAGLE_INDEX_WORKERS = int(os.environ.get("EAGLE_INDEX_WORKERS", "12"))
 
 # ======================
 # 設定
@@ -816,10 +820,9 @@ def build_eagle_item_index(library=DEFAULT_LIBRARY):
         LOGGER.warning("Skipping unreadable Eagle images directory %s: %s", images_dir, exc)
         return {"items": {}, "ordered_ids": [], "active_ids": [], "deleted_ids": [], "folder_summaries": []}
 
-    for entry in entries:
-        if not entry.name.lower().endswith(".info"):
-            continue
+    info_entries = [entry for entry in entries if entry.name.lower().endswith(".info")]
 
+    def build_item(entry):
         item_id = entry.name[:-5]
         meta_path = os.path.join(entry.path, "metadata.json")
         try:
@@ -827,19 +830,19 @@ def build_eagle_item_index(library=DEFAULT_LIBRARY):
                 raw_meta = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
             LOGGER.warning("Skipping unreadable Eagle item metadata %s: %s", meta_path, exc)
-            continue
+            return None
 
         meta = _compact_eagle_meta(raw_meta)
         media_name = _fast_eagle_media_name(entry.path, meta)
         if not media_name:
-            continue
+            return None
 
         folder_ids = meta.get("folders", raw_meta.get("folders", []))
         if not isinstance(folder_ids, list):
             folder_ids = []
         folders = [folder_lookup[fid]["path"] for fid in folder_ids if fid in folder_lookup]
         sort_time = eagle_sort_time(meta)
-        items[item_id] = {
+        return item_id, {
             "id": item_id,
             "title": media_name or meta.get("name") or item_id,
             "media_name": media_name,
@@ -849,6 +852,26 @@ def build_eagle_item_index(library=DEFAULT_LIBRARY):
             "sort_time": sort_time,
             "search_text": _eagle_item_search_text(item_id, media_name, folders, meta),
         }
+
+    worker_count = max(1, min(EAGLE_INDEX_WORKERS, len(info_entries) or 1))
+    if worker_count == 1:
+        for entry in info_entries:
+            result = build_item(entry)
+            if result:
+                item_id, item = result
+                items[item_id] = item
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(build_item, entry) for entry in info_entries]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    LOGGER.warning("Skipping Eagle item after index worker failure: %s", exc)
+                    continue
+                if result:
+                    item_id, item = result
+                    items[item_id] = item
 
     ordered_ids = sorted(
         items.keys(),
@@ -868,7 +891,7 @@ def build_eagle_item_index(library=DEFAULT_LIBRARY):
     }
 
 
-def _read_eagle_item_index_from_disk(path, signature):
+def _read_eagle_item_index_payload(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -877,10 +900,19 @@ def _read_eagle_item_index_from_disk(path, signature):
 
     if payload.get("version") != EAGLE_ITEM_INDEX_VERSION:
         return None
+    index = payload.get("index")
+    if not isinstance(index, dict):
+        return None
+    return payload
+
+
+def _read_eagle_item_index_from_disk(path, signature):
+    payload = _read_eagle_item_index_payload(path)
+    if payload is None:
+        return None
     if payload.get("signature") != signature:
         return None
-    index = payload.get("index")
-    return index if isinstance(index, dict) else None
+    return payload["index"]
 
 
 def _write_eagle_item_index_to_disk(path, signature, index):
@@ -902,6 +934,29 @@ def _write_eagle_item_index_to_disk(path, signature, index):
         LOGGER.warning("Could not write Eagle index cache %s: %s", path, exc)
 
 
+def _schedule_eagle_index_rebuild(library, signature, cache_path, cache_key):
+    rebuild_key = (cache_key, json.dumps(signature, sort_keys=True))
+    with EAGLE_ITEM_INDEX_LOCK:
+        if rebuild_key in EAGLE_ITEM_INDEX_REBUILDING:
+            return
+        EAGLE_ITEM_INDEX_REBUILDING.add(rebuild_key)
+
+    def rebuild():
+        try:
+            LOGGER.info("Refreshing Eagle index in background for %s", library)
+            index = build_eagle_item_index(library)
+            _write_eagle_item_index_to_disk(cache_path, signature, index)
+            with EAGLE_ITEM_INDEX_LOCK:
+                EAGLE_ITEM_INDEX_CACHE[cache_key] = {"signature": signature, "index": index}
+        except Exception as exc:
+            LOGGER.warning("Background Eagle index refresh failed for %s: %s", library, exc)
+        finally:
+            with EAGLE_ITEM_INDEX_LOCK:
+                EAGLE_ITEM_INDEX_REBUILDING.discard(rebuild_key)
+
+    threading.Thread(target=rebuild, name=f"eagle-index-{library}", daemon=True).start()
+
+
 def eagle_item_index(library=DEFAULT_LIBRARY, refresh=False):
     library = resolve_library(library)
     library_path = LIBRARIES[library]
@@ -909,15 +964,45 @@ def eagle_item_index(library=DEFAULT_LIBRARY, refresh=False):
     cache_key = os.path.abspath(library_path)
 
     cached = EAGLE_ITEM_INDEX_CACHE.get(cache_key)
-    if not refresh and cached and cached.get("signature") == signature:
-        return cached["index"]
+    if not refresh and cached:
+        if cached.get("signature") == signature:
+            return cached["index"]
+        if cached.get("stale_for") == signature:
+            return cached["index"]
 
     cache_path = eagle_index_cache_path(library)
+    if refresh:
+        if cached and isinstance(cached.get("index"), dict):
+            _schedule_eagle_index_rebuild(library, signature, cache_path, cache_key)
+            return cached["index"]
+
+        existing_payload = _read_eagle_item_index_payload(cache_path)
+        if existing_payload is not None:
+            existing_index = existing_payload["index"]
+            EAGLE_ITEM_INDEX_CACHE[cache_key] = {
+                "signature": existing_payload.get("signature"),
+                "stale_for": signature,
+                "index": existing_index,
+            }
+            _schedule_eagle_index_rebuild(library, signature, cache_path, cache_key)
+            return existing_index
+
     if not refresh:
         disk_index = _read_eagle_item_index_from_disk(cache_path, signature)
         if disk_index is not None:
             EAGLE_ITEM_INDEX_CACHE[cache_key] = {"signature": signature, "index": disk_index}
             return disk_index
+
+        stale_payload = _read_eagle_item_index_payload(cache_path)
+        if stale_payload is not None:
+            stale_index = stale_payload["index"]
+            EAGLE_ITEM_INDEX_CACHE[cache_key] = {
+                "signature": stale_payload.get("signature"),
+                "stale_for": signature,
+                "index": stale_index,
+            }
+            _schedule_eagle_index_rebuild(library, signature, cache_path, cache_key)
+            return stale_index
 
     index = build_eagle_item_index(library)
     EAGLE_ITEM_INDEX_CACHE[cache_key] = {"signature": signature, "index": index}
