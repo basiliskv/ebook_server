@@ -16,9 +16,10 @@ EAGLE_CACHE_TTL_SECONDS = float(os.environ.get("EAGLE_CACHE_TTL_SECONDS", "8"))
 EAGLE_PAGE_NEIGHBOR_SCAN_LIMIT = int(os.environ.get("EAGLE_PAGE_NEIGHBOR_SCAN_LIMIT", "900"))
 EAGLE_PAGE_WINDOW_LIMIT = int(os.environ.get("EAGLE_PAGE_WINDOW_LIMIT", "360"))
 EAGLE_FOLDER_SUMMARY_SCAN_LIMIT = int(os.environ.get("EAGLE_FOLDER_SUMMARY_SCAN_LIMIT", "5000"))
+EAGLE_INDEX_SIGNATURE_TTL_SECONDS = float(os.environ.get("EAGLE_INDEX_SIGNATURE_TTL_SECONDS", "5"))
 EAGLE_ITEM_SNAPSHOT_CACHE = {}
 EAGLE_ITEM_INDEX_CACHE = {}
-EAGLE_ITEM_INDEX_VERSION = 2
+EAGLE_ITEM_INDEX_VERSION = 3
 
 # ======================
 # 設定
@@ -407,6 +408,39 @@ def _file_mtime(path):
         return None
 
 
+def _signature_cache_tick():
+    ttl = max(EAGLE_INDEX_SIGNATURE_TTL_SECONDS, 1)
+    return int(time.time() / ttl)
+
+
+@lru_cache(maxsize=64)
+def _eagle_metadata_signature_cached(images_dir, _images_mtime, _tick):
+    count = 0
+    mtime_total = 0
+    size_total = 0
+    try:
+        entries = list(os.scandir(images_dir))
+    except OSError:
+        return {"metadataCount": 0, "metadataMtimeTotal": 0, "metadataSizeTotal": 0}
+
+    for entry in entries:
+        if not entry.name.lower().endswith(".info"):
+            continue
+        meta_path = os.path.join(entry.path, "metadata.json")
+        try:
+            stat = os.stat(meta_path)
+        except OSError:
+            continue
+        count += 1
+        mtime_total = (mtime_total + getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))) & 0x7FFFFFFFFFFFFFFF
+        size_total = (size_total + stat.st_size) & 0x7FFFFFFFFFFFFFFF
+    return {
+        "metadataCount": count,
+        "metadataMtimeTotal": mtime_total,
+        "metadataSizeTotal": size_total,
+    }
+
+
 def eagle_library_metadata(library=DEFAULT_LIBRARY):
     library = resolve_library(library)
     meta_path = os.path.join(LIBRARIES[library], "metadata.json")
@@ -664,10 +698,17 @@ def eagle_index_signature(library=DEFAULT_LIBRARY):
     library_path = LIBRARIES[library]
     images_dir = eagle_images_dir(library)
     metadata_path = os.path.join(library_path, "metadata.json")
+    images_mtime = _file_mtime(images_dir)
+    metadata_signature = _eagle_metadata_signature_cached(
+        images_dir,
+        images_mtime,
+        _signature_cache_tick(),
+    )
     return {
         "libraryPath": os.path.abspath(library_path),
-        "imagesMtime": _file_mtime(images_dir),
+        "imagesMtime": images_mtime,
         "libraryMtime": _file_mtime(metadata_path),
+        **metadata_signature,
     }
 
 
